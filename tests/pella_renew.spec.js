@@ -471,7 +471,7 @@ async function solveTurnstile(page) {
             return false;
         }
         console.log('❌ Cloudflare 验证码组件始终未渲染');
-        throw new Error('❌ Cloudflare 验证码 iframe 未渲染：疑似 Actions 数据中心 IP 被 Cloudflare 拦截，建议配置住宅代理（GOST_PROXY secret）');
+        throw new Error('❌ Cloudflare 验证码 iframe 未渲染：当前节点 IP 仍被 Cloudflare 拦截（数据中心 IP 无效），请改用住宅/移动节点（NODE_LINK）或接入打码平台');
     }
 
     const points = await getTurnstileClickPoints(page);
