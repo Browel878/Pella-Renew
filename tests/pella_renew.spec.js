@@ -390,9 +390,10 @@ async function solveTurnstile(page) {
     `);
     await sleep(1500);
 
-    // 等待并检查 Cloudflare 验证码 iframe 是否渲染（穿透 shadow DOM）
+    // 等待 Cloudflare 验证码 iframe 渲染（最多 20 秒，穿透 shadow DOM）
     let hasCfFrame = false;
-    for (let i = 0; i < 10; i++) {
+    const cfWaitStart = Date.now();
+    while (Date.now() - cfWaitStart < 20000) {
         hasCfFrame = await page.evaluate(`
             (function(){
                 function findIn(root, list) {
@@ -407,10 +408,10 @@ async function solveTurnstile(page) {
             })()
         `).catch(() => false);
         if (hasCfFrame) break;
-        await sleep(500);
+        await sleep(1000);
     }
 
-    // 深度诊断：打印验证码组件结构（含 shadow DOM、容器 HTML、token 输入值）
+    // 深度诊断：打印验证码组件结构（含 shadow DOM、容器 HTML、token 输入值）+ 组件区域截图
     try {
         const info = await page.evaluate(`
             (function(){
@@ -448,14 +449,29 @@ async function solveTurnstile(page) {
             })()
         `);
         console.log('🔍 Turnstile 深度诊断: ' + JSON.stringify(info));
+        if (info && info.container) {
+            await page.screenshot({
+                path: 'turnstile_widget_area.png',
+                clip: {
+                    x: Math.max(0, info.container.x - 40),
+                    y: Math.max(0, info.container.y - 40),
+                    width: info.container.w + 80,
+                    height: info.container.h + 80
+                }
+            }).catch(() => {});
+        }
     } catch (e) {}
 
-    if (!hasCfFrame && !cfPageReloaded) {
-        cfPageReloaded = true;
-        console.log('⚠️ Turnstile iframe 未渲染，刷新页面后重试一次...');
-        await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
-        await sleep(3000);
-        return false;
+    if (!hasCfFrame) {
+        if (!cfPageReloaded) {
+            cfPageReloaded = true;
+            console.log('⚠️ Turnstile iframe 未渲染，刷新页面后重试一次...');
+            await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+            await sleep(3000);
+            return false;
+        }
+        console.log('❌ Cloudflare 验证码组件始终未渲染');
+        throw new Error('❌ Cloudflare 验证码 iframe 未渲染：疑似 Actions 数据中心 IP 被 Cloudflare 拦截，建议配置住宅代理（GOST_PROXY secret）');
     }
 
     const points = await getTurnstileClickPoints(page);
