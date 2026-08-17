@@ -8,6 +8,7 @@ const [PELLA_EMAIL, PELLA_PASSWORD] = (process.env.PELLA_ACCOUNT || ',').split('
 const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 
 const TIMEOUT = 120000;
+let cfPageReloaded = false; // 验证码 iframe 未渲染时，仅刷新页面重试一次
 
 // ── 广告拦截脚本（油猴 5.0 完整版，最早注入）────────────────
 const AD_BLOCK_SCRIPT = `
@@ -81,7 +82,7 @@ const AD_BLOCK_SCRIPT = `
                 'script[src*="fqjiujafk.com"]',
             ].join(',')).forEach(el => el.remove());
 
-            // 移除所有 netpub 广告元素
+            // 移除所有 netpub 广告元素（跳过 Cloudflare Turnstile 验证码 iframe，否则验证码无法渲染）
             document.querySelectorAll([
                 'iframe[id*="netpub"]',
                 'div[id*="netpub_ins"]',
@@ -89,7 +90,11 @@ const AD_BLOCK_SCRIPT = `
                 'div[class*="eldhywa"]',
                 'iframe[height="0"]',
                 'iframe[style*="display: none"]'
-            ].join(',')).forEach(el => el.remove());
+            ].join(',')).forEach(el => {
+                var s = (el.src || '');
+                if (s.indexOf('cloudflare') >= 0 || s.indexOf('turnstile') >= 0) return;
+                el.remove();
+            });
         }
 
         removeAds();
@@ -378,11 +383,17 @@ async function solveTurnstile(page) {
     `);
     await sleep(1500);
 
-    const points = await getTurnstileClickPoints(page);
-    if (points.length === 0) {
-        console.log('❌ 验证码位置获取失败');
-        await page.screenshot({ path: 'turnstile_no_coords.png' });
-        return false;
+    // 等待并检查 Cloudflare 验证码 iframe 是否渲染（若被广告拦截脚本误删则刷新页面重试）
+    let hasCfFrame = false;
+    for (let i = 0; i < 10; i++) {
+        hasCfFrame = await page.evaluate(`
+            (function(){
+                var fs = Array.from(document.querySelectorAll('iframe'));
+                return fs.some(function(f){ var s = f.src || ''; return s.indexOf('cloudflare') >= 0 || s.indexOf('turnstile') >= 0; });
+            })()
+        `).catch(() => false);
+        if (hasCfFrame) break;
+        await sleep(500);
     }
 
     // 诊断：打印验证码组件布局，便于校准点击坐标
@@ -401,6 +412,21 @@ async function solveTurnstile(page) {
         `);
         console.log('🔍 Turnstile 布局: ' + JSON.stringify(info));
     } catch (e) {}
+
+    if (!hasCfFrame && !cfPageReloaded) {
+        cfPageReloaded = true;
+        console.log('⚠️ Turnstile iframe 未渲染（疑似被广告拦截误删），刷新页面后重试...');
+        await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+        await sleep(3000);
+        return false;
+    }
+
+    const points = await getTurnstileClickPoints(page);
+    if (points.length === 0) {
+        console.log('❌ 验证码位置获取失败');
+        await page.screenshot({ path: 'turnstile_no_coords.png' });
+        return false;
+    }
 
     // 用 Playwright 鼠标事件点击（CDP 可信事件，能命中 iframe 内复选框，无需 xdotool/真实屏幕坐标）
     const urlBefore = page.url();
