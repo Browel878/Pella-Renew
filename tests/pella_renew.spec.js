@@ -295,12 +295,19 @@ async function getTurnstileClickPoints(page) {
     const pts = await page.evaluate(`
         (function(){
             var out = [];
-            // 1) turnstile/cloudflare iframe（复选框通常在 iframe 内左侧）
-            var iframes = Array.from(document.querySelectorAll('iframe'));
-            for (var i = 0; i < iframes.length; i++) {
-                var src = iframes[i].src || '';
+            function findIframes(root) {
+                var list = [];
+                if (!root) return list;
+                if (root.shadowRoot) list = list.concat(findIframes(root.shadowRoot));
+                root.querySelectorAll('iframe').forEach(function(f){ list.push(f); });
+                root.querySelectorAll('*').forEach(function(el){ if (el.shadowRoot) list = list.concat(findIframes(el.shadowRoot)); });
+                return list;
+            }
+            // 1) turnstile/cloudflare iframe（穿透 shadow DOM，复选框通常在 iframe 内左侧）
+            findIframes(document).forEach(function(f){
+                var src = f.src || '';
                 if (src.indexOf('cloudflare') >= 0 || src.indexOf('turnstile') >= 0) {
-                    var r = iframes[i].getBoundingClientRect();
+                    var r = f.getBoundingClientRect();
                     if (r.width > 0 && r.height > 0) {
                         var cx = Math.round(r.x + r.width / 2);
                         var cy = Math.round(r.y + r.height / 2);
@@ -310,7 +317,7 @@ async function getTurnstileClickPoints(page) {
                         out.push({ x: cx, y: cy });
                     }
                 }
-            }
+            });
             // 2) .cf-turnstile 容器
             var c = document.querySelector('.cf-turnstile');
             if (c) {
@@ -383,39 +390,69 @@ async function solveTurnstile(page) {
     `);
     await sleep(1500);
 
-    // 等待并检查 Cloudflare 验证码 iframe 是否渲染（若被广告拦截脚本误删则刷新页面重试）
+    // 等待并检查 Cloudflare 验证码 iframe 是否渲染（穿透 shadow DOM）
     let hasCfFrame = false;
     for (let i = 0; i < 10; i++) {
         hasCfFrame = await page.evaluate(`
             (function(){
-                var fs = Array.from(document.querySelectorAll('iframe'));
-                return fs.some(function(f){ var s = f.src || ''; return s.indexOf('cloudflare') >= 0 || s.indexOf('turnstile') >= 0; });
+                function findIn(root, list) {
+                    if (!root) return;
+                    if (root.shadowRoot) findIn(root.shadowRoot, list);
+                    root.querySelectorAll('iframe').forEach(function(f){ list.push(f); });
+                    root.querySelectorAll('*').forEach(function(el){ if (el.shadowRoot) findIn(el.shadowRoot, list); });
+                }
+                var all = [];
+                findIn(document, all);
+                return all.some(function(f){ var s = f.src || ''; return s.indexOf('cloudflare') >= 0 || s.indexOf('turnstile') >= 0; });
             })()
         `).catch(() => false);
         if (hasCfFrame) break;
         await sleep(500);
     }
 
-    // 诊断：打印验证码组件布局，便于校准点击坐标
+    // 深度诊断：打印验证码组件结构（含 shadow DOM、容器 HTML、token 输入值）
     try {
         const info = await page.evaluate(`
             (function(){
-                var fs = Array.from(document.querySelectorAll('iframe'));
-                var out = fs.map(function(f){
+                function findIframes(root) {
+                    var list = [];
+                    if (!root) return list;
+                    if (root.shadowRoot) list = list.concat(findIframes(root.shadowRoot));
+                    root.querySelectorAll('iframe').forEach(function(f){ list.push(f); });
+                    root.querySelectorAll('*').forEach(function(el){ if (el.shadowRoot) list = list.concat(findIframes(el.shadowRoot)); });
+                    return list;
+                }
+                var c = document.querySelector('.cf-turnstile');
+                var cr = c ? c.getBoundingClientRect() : null;
+                var shadow = { hasShadowRoot: false, iframes: [], html: '' };
+                if (c && c.shadowRoot) {
+                    shadow.hasShadowRoot = true;
+                    shadow.iframes = findIframes(c.shadowRoot).map(function(f){
+                        var r = f.getBoundingClientRect();
+                        return { src: (f.src || '').substring(0, 70), x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+                    });
+                    shadow.html = c.shadowRoot.innerHTML.substring(0, 200);
+                }
+                var allIf = findIframes(document).map(function(f){
                     var r = f.getBoundingClientRect();
                     return { src: (f.src || '').substring(0, 70), x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
                 });
-                var c = document.querySelector('.cf-turnstile');
-                var cr = c ? c.getBoundingClientRect() : null;
-                return { iframes: out, container: cr ? { x: Math.round(cr.x), y: Math.round(cr.y), w: Math.round(cr.width), h: Math.round(cr.height) } : null };
+                var inp = document.querySelector('input[name="cf-turnstile-response"]');
+                return {
+                    allIframes: allIf,
+                    container: cr ? { x: Math.round(cr.x), y: Math.round(cr.y), w: Math.round(cr.width), h: Math.round(cr.height) } : null,
+                    containerHtml: c ? c.innerHTML.substring(0, 200) : null,
+                    shadow: shadow,
+                    inputValLen: inp ? (inp.value || '').length : -1
+                };
             })()
         `);
-        console.log('🔍 Turnstile 布局: ' + JSON.stringify(info));
+        console.log('🔍 Turnstile 深度诊断: ' + JSON.stringify(info));
     } catch (e) {}
 
     if (!hasCfFrame && !cfPageReloaded) {
         cfPageReloaded = true;
-        console.log('⚠️ Turnstile iframe 未渲染（疑似被广告拦截误删），刷新页面后重试...');
+        console.log('⚠️ Turnstile iframe 未渲染，刷新页面后重试一次...');
         await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
         await sleep(3000);
         return false;
