@@ -14,7 +14,11 @@
 |---|---|---|
 | `PELLA_ACCOUNT` | `email,password` | ✅ |
 | `TG_BOT` | `chat_id,bot_token` | ✅ |
-| `GOST_PROXY` | `socks5://host:port` | 可选 |
+| `NODE_LINK` | v2ray 分享链接，如 `vless://` `vmess://` `trojan://` `hysteria2://` `tuic://` `anytls://` `socks5://`，不配置则直连 | 可选 |
+
+### 为什么需要 NODE_LINK（代理）
+
+GitHub Actions 的运行器使用数据中心 IP，Cloudflare Turnstile 不会为机房 IP 渲染验证码，导致续期流程卡在验证码一步。配置 `NODE_LINK` 后，workflow 会自动用 **sing-box** 搭建本地代理（同 Auto-Renew-HidenCloud 项目的方式），浏览器流量从你的节点 IP 出去，验证码才能正常渲染。**请使用注册 Pella 账号时的节点**（确认在 v2rayN 里能正常连接）。
 
 ### 3️⃣ 启用 Actions
 

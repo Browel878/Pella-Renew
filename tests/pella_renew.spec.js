@@ -1,7 +1,7 @@
 // tests/pella_renew.spec.js
 const { test, chromium } = require('@playwright/test');
 const https = require('https');
-const http = require('http');
+const net = require('net');
 
 // ── 账号配置 ────────────────────────────────────────────────
 const [PELLA_EMAIL, PELLA_PASSWORD] = (process.env.PELLA_ACCOUNT || ',').split(',');
@@ -517,23 +517,27 @@ test('Pella 自动续期', async () => {
         throw new Error('❌ 缺少 PELLA_ACCOUNT，格式: email,password');
     }
 
-    // ── 代理检测 ─────────────────────────────────────────────
+    // ── 代理检测（PROXY_SERVER：sing-box/v2ray 本地 SOCKS 代理）──
     let proxyConfig = undefined;
-    if (process.env.GOST_PROXY) {
+    const proxyServer = (process.env.PROXY_SERVER || '').trim();
+    if (proxyServer) {
+        let ph = '127.0.0.1';
+        let pp = 1080;
         try {
-            await new Promise((resolve, reject) => {
-                const req = http.request(
-                    { host: '127.0.0.1', port: 8080, path: '/', method: 'GET', timeout: 3000 },
-                    () => resolve()
-                );
-                req.on('error', reject);
-                req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-                req.end();
-            });
-            proxyConfig = { server: 'http://127.0.0.1:8080' };
-            console.log('🛡️ 本地代理连通，使用 GOST 转发');
-        } catch {
-            console.log('⚠️ 本地代理不可达，降级为直连');
+            const pu = new URL(proxyServer.replace(/^socks:\/\//, 'socks5://'));
+            ph = pu.hostname || ph;
+            pp = Number(pu.port || 1080);
+        } catch (e) {}
+        const ok = await new Promise((resolve) => {
+            const sock = net.connect({ host: ph, port: pp, timeout: 3000 }, () => { sock.destroy(); resolve(true); });
+            sock.on('error', () => resolve(false));
+            sock.on('timeout', () => { sock.destroy(); resolve(false); });
+        });
+        if (ok) {
+            proxyConfig = { server: proxyServer };
+            console.log(`🛡️ 本地代理连通: ${proxyServer}`);
+        } else {
+            console.log(`⚠️ 本地代理不可达 (${ph}:${pp})，降级为直连`);
         }
     }
 
