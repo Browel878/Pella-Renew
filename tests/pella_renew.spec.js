@@ -297,8 +297,12 @@ async function getTurnstileClickPoints(page) {
                 if (src.indexOf('cloudflare') >= 0 || src.indexOf('turnstile') >= 0) {
                     var r = iframes[i].getBoundingClientRect();
                     if (r.width > 0 && r.height > 0) {
-                        out.push({ x: Math.round(r.x + 30), y: Math.round(r.y + r.height / 2) });
-                        out.push({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) });
+                        var cx = Math.round(r.x + r.width / 2);
+                        var cy = Math.round(r.y + r.height / 2);
+                        out.push({ x: Math.round(r.x + 28), y: cy });
+                        out.push({ x: Math.round(r.x + 28), y: cy - 6 });
+                        out.push({ x: Math.round(r.x + 28), y: cy + 6 });
+                        out.push({ x: cx, y: cy });
                     }
                 }
             }
@@ -307,9 +311,10 @@ async function getTurnstileClickPoints(page) {
             if (c) {
                 var rc = c.getBoundingClientRect();
                 if (rc.width > 0 && rc.height > 0) {
-                    out.push({ x: Math.round(rc.x + 30), y: Math.round(rc.y + rc.height / 2) });
-                    out.push({ x: Math.round(rc.x + rc.width / 2), y: Math.round(rc.y + rc.height / 2) });
-                    out.push({ x: Math.round(rc.x + 368), y: Math.round(rc.y + rc.height / 2) });
+                    var ccy = Math.round(rc.y + rc.height / 2);
+                    out.push({ x: Math.round(rc.x + 30), y: ccy });
+                    out.push({ x: Math.round(rc.x + rc.width / 2), y: ccy });
+                    out.push({ x: Math.round(rc.x + 368), y: ccy });
                 }
             }
             return out;
@@ -380,16 +385,40 @@ async function solveTurnstile(page) {
         return false;
     }
 
+    // 诊断：打印验证码组件布局，便于校准点击坐标
+    try {
+        const info = await page.evaluate(`
+            (function(){
+                var fs = Array.from(document.querySelectorAll('iframe'));
+                var out = fs.map(function(f){
+                    var r = f.getBoundingClientRect();
+                    return { src: (f.src || '').substring(0, 70), x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+                });
+                var c = document.querySelector('.cf-turnstile');
+                var cr = c ? c.getBoundingClientRect() : null;
+                return { iframes: out, container: cr ? { x: Math.round(cr.x), y: Math.round(cr.y), w: Math.round(cr.width), h: Math.round(cr.height) } : null };
+            })()
+        `);
+        console.log('🔍 Turnstile 布局: ' + JSON.stringify(info));
+    } catch (e) {}
+
     // 用 Playwright 鼠标事件点击（CDP 可信事件，能命中 iframe 内复选框，无需 xdotool/真实屏幕坐标）
+    const urlBefore = page.url();
     for (const pt of points) {
         try {
             await page.mouse.click(pt.x, pt.y);
             console.log(`🖱️ 点击验证码位置 (${pt.x}, ${pt.y})`);
+            await page.screenshot({ path: `turnstile_${pt.x}_${pt.y}.png` }).catch(() => {});
         } catch (e) {
             console.log(`⚠️ 点击失败: ${e.message}`);
         }
-        for (let i = 0; i < 40; i++) {
+        for (let i = 0; i < 16; i++) {
             await sleep(500);
+            // 验证通过：拿到 token，或页面已跳转
+            if (page.url() !== urlBefore) {
+                console.log(`✅ 验证后页面跳转: ${page.url()}`);
+                return true;
+            }
             if (await checkCFToken(page)) {
                 const token = await page.evaluate('window.__cf_turnstile_token__ || ""');
                 console.log(`✅ Cloudflare Turnstile 验证通过！token：${token.substring(0, 50)}...`);
@@ -434,10 +463,14 @@ test('Pella 自动续期', async () => {
     const browser = await chromium.launch({
         headless: false,
         proxy: proxyConfig,
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        ignoreDefaultArgs: ['--enable-automation'], // 去掉自动化标记，降低被 Turnstile 识别的概率
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'],
     });
     const context = await browser.newContext();
     await context.addInitScript(AD_BLOCK_SCRIPT);
+    await context.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    });
     const page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT);
     console.log('🚀 浏览器就绪！');
