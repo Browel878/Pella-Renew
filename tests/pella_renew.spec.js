@@ -32,8 +32,17 @@ const AD_BLOCK_SCRIPT = `
 
     // ===== DOM 加载后执行 =====
     function init() {
-        // 1. 阻止所有 window.open
-        window.open = () => null;
+        // 1. 选择性拦截 window.open（仅拦截广告弹窗，放行合法链接如 pella.app/renew）
+        const blockedOpenDomains = ['crn77.com', 'madurird.com', 'tinyurl.com', 'popads', 'avnsgames.com', 'fqjiujafk.com'];
+        const originalWindowOpen = window.open;
+        window.open = function (url, ...args) {
+            const u = String(url || '');
+            if (!u || blockedOpenDomains.some(d => u.includes(d))) {
+                console.log('[AdBlock] 拦截广告弹窗:', u);
+                return null;
+            }
+            return originalWindowOpen.call(this, u, ...args);
+        };
 
         // 2. 拦截广告链接点击
         document.addEventListener('click', e => {
@@ -137,6 +146,114 @@ function nowStr() {
 
 function sleep(ms) {
     return new Promise(r => setTimeout(r, ms));
+}
+
+// ── 判断是否为 pella renew 地址（兼容 /renew/xxx、/renew?xxx）─────
+function isRenewUrl(url) {
+    return /pella\.app\/[^?#]*renew/i.test(url || '');
+}
+
+// ── 等待任意标签页到达 pella.app/renew ─────────────────────────
+async function waitForAnyRenewPage(context, timeout = 25000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+        for (const p of context.pages()) {
+            try {
+                if (!p.isClosed() && isRenewUrl(p.url())) return p;
+            } catch (e) {}
+        }
+        await sleep(500);
+    }
+    return null;
+}
+
+// ── 通用：查找并点击 Continue/继续 按钮 ────────────────────────
+async function clickContinue(page) {
+    const selectors = [
+        '#continue',
+        '#submit-button',
+        '#continue-button',
+        'p.getmylink',
+        'span.wp2continuelink',
+        'button[type="submit"]',
+        'input[type="submit"]',
+        'button:has-text("Continue")',
+        'a:has-text("Continue")',
+        'span:has-text("Continue")',
+        'button:has-text("继续")',
+        'a:has-text("继续")',
+        '[class*="continue" i]',
+        '[id*="continue" i]',
+    ];
+    for (const sel of selectors) {
+        try {
+            if ((await page.locator(sel).count()) === 0) continue;
+            await page.click(sel, { timeout: 2000 });
+            console.log(`  ✅ 点击 Continue 按钮: ${sel}`);
+            return true;
+        } catch (e) {}
+    }
+    // 兜底：按文本匹配可见的按钮/链接
+    try {
+        const clicked = await page.evaluate(`
+            (function(){
+                var els = Array.from(document.querySelectorAll('button, a, input[type="submit"], [role="button"]'));
+                for (var i = 0; i < els.length; i++) {
+                    var t = (els[i].textContent || '').trim().toLowerCase();
+                    var v = (els[i].value || '').toLowerCase();
+                    if ((t.includes('continue') || t.includes('继续') || v.includes('continue')) && els[i].offsetParent !== null) {
+                        els[i].click();
+                        return true;
+                    }
+                }
+                return false;
+            })()
+        `);
+        if (clicked) {
+            console.log('  ✅ 已通过文本匹配点击 Continue');
+            return true;
+        }
+    } catch (e) {}
+    return false;
+}
+
+// ── 通用：查找并点击 renew 按钮/链接（在页面内执行点击）────────
+async function clickRenewButton(page) {
+    return await page.evaluate(`
+        (function(){
+            var hrefRe = /pella\\.app\\/[^?#]*renew/i;
+            var els = Array.from(document.querySelectorAll('a, button'));
+            // 1) 指向 pella.app/renew 的链接
+            for (var i = 0; i < els.length; i++) {
+                var h = els[i].href || '';
+                if (hrefRe.test(h) && els[i].offsetParent !== null && !els[i].disabled) {
+                    els[i].click();
+                    return { found: true, clicked: true, disabled: false, href: h };
+                }
+            }
+            // 2) 常见 get-link 类按钮
+            var sels = ['a.btn.btn-success.btn-lg.get-link', 'a.get-link', '#getnewlink'];
+            for (var j = 0; j < sels.length; j++) {
+                var el = document.querySelector(sels[j]);
+                if (el && el.offsetParent !== null) {
+                    if (el.disabled) return { found: true, clicked: false, disabled: true, href: el.href || '' };
+                    el.click();
+                    return { found: true, clicked: true, disabled: false, href: el.href || '' };
+                }
+            }
+            // 3) 文本匹配 renew / get link / 续期 / 获取链接
+            var txtRe = /renew|get link|续期|获取链接/i;
+            for (var k = 0; k < els.length; k++) {
+                var t = (els[k].textContent || '').trim();
+                if (txtRe.test(t) && t.length < 60 && els[k].offsetParent !== null) {
+                    if (els[k].disabled) return { found: true, clicked: false, disabled: true, href: els[k].href || '' };
+                    els[k].click();
+                    return { found: true, clicked: true, disabled: false, href: els[k].href || '' };
+                }
+            }
+            return { found: false, clicked: false, disabled: false, href: '' };
+        })()
+    `);
 }
 
 function sendTG(result, extra = '') {
@@ -319,62 +436,6 @@ async function solveTurnstile(page) {
     return false;
 }
 
-// ── 处理 fitnesstipz 中转页 ──────────────────────────────────
-async function handleFitnesstipz(page) {
-    console.log(`  📄 fitnesstipz 中转页: ${page.url()}`);
-
-    try {
-        await page.waitForSelector('p.getmylink', { timeout: 10000 });
-        await page.click('p.getmylink');
-        console.log('  ✅ 已点击 Continue... 触发倒计时');
-    } catch (e) {
-        console.log(`  ⚠️ getmylink 未找到：${e.message}`);
-    }
-
-    console.log('  ⏳ 等待倒计时结束...');
-    for (let i = 0; i < 60; i++) {
-        await sleep(1000);
-        const timerVisible = await page.evaluate(`
-            (function(){
-                var el = document.querySelector('#newtimer');
-                if (!el) return false;
-                var style = window.getComputedStyle(el);
-                return style.display !== 'none' && style.visibility !== 'hidden';
-            })()
-        `);
-        if (!timerVisible) {
-            console.log('  ✅ 倒计时结束');
-            break;
-        }
-        if (i === 59) console.log('  ⚠️ 倒计时等待超时');
-    }
-
-    await sleep(1000);
-
-    try {
-        await page.click('span.wp2continuelink');
-        console.log('  ✅ 已点击 wp2continuelink');
-        await sleep(1500);
-    } catch (e) {
-        console.log(`  ⚠️ wp2continuelink 未找到：${e.message}`);
-    }
-
-    await page.evaluate('window.scrollTo(0, document.body.scrollHeight)');
-    await sleep(1000);
-
-    try {
-        await page.waitForSelector('#getnewlink', { timeout: 10000 });
-        await page.click('#getnewlink');
-        console.log('  ✅ 已点击 Get Link');
-    } catch (e) {
-        console.log(`  ❌ getnewlink 未找到：${e.message}`);
-        await page.screenshot({ path: 'fitnesstipz_fail.png' });
-        return false;
-    }
-
-    return true;
-}
-
 // ── 主测试 ──────────────────────────────────────────────────
 test('Pella 自动续期', async () => {
     if (!PELLA_EMAIL || !PELLA_PASSWORD) {
@@ -492,105 +553,82 @@ test('Pella 自动续期', async () => {
             return;
         }
 
-        // ── 访问广告链接（tpi.li 第一关）────────────────────────
+        // ── 访问广告链接（短链中转）────────────────────────────
         console.log(`🌐 访问广告链接: ${renewLink}`);
         await page.goto(renewLink, { waitUntil: 'domcontentloaded' });
         await sleep(3000);
         console.log(`📄 当前页面: ${page.url()}`);
 
-        // ── CF Turnstile 验证 ─────────────────────────────────
-        const hasTurnstile = await page.evaluate(
-            '!!document.querySelector("input[name=\'cf-turnstile-response\']")'
-        );
-        if (hasTurnstile) {
-            console.log('🛡️ 检测到 CF Turnstile，开始处理...');
-            const cfOk = await solveTurnstile(page);
-            if (!cfOk) {
-                await sendTG('❌ CF Turnstile 验证失败');
-                throw new Error('❌ CF Turnstile 验证失败');
+        // ── 通用穿站流程：Continue → Turnstile → 跳转，可多轮，直至出现并点击 renew 按钮 ──
+        console.log('🔄 开始穿站流程（可能多轮 Continue / Turnstile / 倒计时）...');
+        const knownPages = context.pages();
+        const maxRounds = 25;
+        let curPage = page;
+
+        for (let round = 0; round < maxRounds; round++) {
+            // 接管新弹出的标签页
+            const fresh = context.pages().filter(p => !knownPages.includes(p) && !p.isClosed());
+            if (fresh.length > 0) {
+                curPage = fresh[fresh.length - 1];
+                knownPages.push(curPage);
+                try { await curPage.waitForLoadState('domcontentloaded', { timeout: 10000 }); } catch (e) {}
+                console.log(`📄 接管新标签页: ${curPage.url()}`);
             }
-        }
-
-        // ── 点击 #continue ────────────────────────────────────
-        console.log('📤 点击 Continue...');
-        try {
-            await page.waitForSelector('#continue', { timeout: 10000 });
-            await page.click('#continue');
-            await sleep(3000);
-            console.log(`📄 跳转后: ${page.url()}`);
-        } catch (e) {
-            console.log(`⚠️ #continue 未找到：${e.message}`);
-        }
-
-        // ── 处理中转页（fitnesstipz，可能多个）──────────────────
-        let loopCount = 0;
-        while (page.url().includes('fitnesstipz.com') && loopCount < 5) {
-            loopCount++;
-            console.log(`🔄 处理第 ${loopCount} 个中转页...`);
-            const ok = await handleFitnesstipz(page);
-            if (!ok) {
-                await sendTG('❌ 中转页处理失败');
-                throw new Error('❌ 中转页处理失败');
-            }
-            await sleep(3000);
-            console.log(`📄 中转后跳转: ${page.url()}`);
-        }
-
-        // ── tpi.li 第二关：等倒计时 + 点 Get Link ───────────────
-        if (page.url().includes('tpi.li')) {
-            console.log('⏳ 等待 tpi.li 倒计时...');
-            for (let i = 0; i < 60; i++) {
-                await sleep(1000);
-                const timerText = await page.evaluate(`
-                    (function(){
-                        var el = document.querySelector('#timer');
-                        return el ? el.textContent.trim() : '0';
-                    })()
-                `);
-                const timerVal = parseInt(timerText) || 0;
-                if (timerVal <= 0) {
-                    console.log('✅ 倒计时结束');
-                    break;
-                }
-                if (i % 5 === 0) console.log(`  ⏳ 剩余 ${timerVal} 秒...`);
+            if (curPage.isClosed()) {
+                curPage = context.pages().find(p => !p.isClosed()) || page;
             }
 
-            console.log('🔍 获取 renew 链接...');
-            const renewHref = await page.evaluate(`
-                (function(){
-                    var a = document.querySelector('a.btn.btn-success.btn-lg.get-link');
-                    return a ? a.href : null;
-                })()
-            `);
+            const curUrl = curPage.url();
+            console.log(`  [第 ${round + 1}/${maxRounds} 轮] ${curUrl}`);
 
-            if (!renewHref || !renewHref.includes('/renew/')) {
-                await page.screenshot({ path: 'no_renew_href.png' });
-                await sendTG('❌ 未找到 renew 链接');
-                throw new Error('❌ 未找到有效 renew 链接: ' + renewHref);
+            // 1) 已到达 pella.app/renew → 成功
+            if (isRenewUrl(curUrl)) break;
+
+            // 2) 出现 renew 按钮/链接 → 点击
+            const rb = await clickRenewButton(curPage).catch(() => ({ found: false, clicked: false, disabled: false, href: '' }));
+            if (rb.found && rb.clicked) {
+                console.log(`✅ 已点击 renew 按钮${rb.href ? ': ' + rb.href : ''}`);
+                await sleep(3000);
+                continue; // 可能同页跳转或弹窗，下一轮重新判断
+            }
+            if (rb.found && rb.disabled) {
+                console.log('⏳ 检测到 renew 按钮但未激活（倒计时中），等待...');
+                await sleep(2000);
+                continue;
             }
 
-            console.log(`✅ 找到 renew 链接: ${renewHref}`);
-            await page.click('a.btn.btn-success.btn-lg.get-link');
-            await sleep(3000);
-            console.log(`📄 跳转后: ${page.url()}`);
+            // 3) Turnstile 验证 → 点击通过
+            const hasCf = await curPage.evaluate(
+                '!!document.querySelector("input[name=\'cf-turnstile-response\']")'
+            ).catch(() => false);
+            if (hasCf) {
+                console.log('🛡️ 检测到 CF Turnstile，开始处理...');
+                await solveTurnstile(curPage);
+                await sleep(2000);
+                continue;
+            }
+
+            // 4) Continue / 继续 按钮 → 点击进入下一步
+            if (await clickContinue(curPage)) {
+                await sleep(2500);
+                continue;
+            }
+
+            // 5) 本轮无操作目标，等待页面加载/倒计时结束
+            await sleep(1500);
         }
 
-        // ── 确认到达 pella.app/renew ──────────────────────────
+        // ── 确认到达 pella.app/renew（同页跳转或 popup）────────
         console.log('⏳ 等待续期完成...');
-        try {
-            await page.waitForURL(/pella\.app\/renew\//, { timeout: 15000 });
-        } catch {
-            console.log(`⚠️ 未检测到 renew 跳转，当前: ${page.url()}`);
-        }
-
-        const finalUrl = page.url();
+        const renewPage = await waitForAnyRenewPage(context, 25000);
+        const finalUrl = renewPage ? renewPage.url() : page.url();
         console.log(`📄 最终地址: ${finalUrl}`);
-        await page.screenshot({ path: 'final_result.png' });
+        await page.screenshot({ path: 'final_result.png' }).catch(() => {});
 
         // ── 结果判断 ──────────────────────────────────────────
-        if (finalUrl.includes('/renew/')) {
+        if (renewPage && isRenewUrl(finalUrl)) {
             console.log('🎉 续期成功！');
-            await sendTG('✅ 续期成功！');
+            await sendTG('✅ 续期成功！', `🔗 最终URL: ${finalUrl}`);
         } else {
             console.log(`⚠️ 续期结果未知: ${finalUrl}`);
             await sendTG('⚠️ 续期结果未知', `🔗 最终URL: ${finalUrl}`);
